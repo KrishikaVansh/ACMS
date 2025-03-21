@@ -8,9 +8,10 @@ from functools import wraps
 from google_auth_oauthlib.flow import Flow
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your_secret_key'
-JWT_SECRET = "your_jwt_secret"
-DB_CONFIG = {"dbname": "your_db", "user": "your_user", "password": "your_password", "host": "localhost"}
+app.config['SECRET_KEY'] = 'ffljkwfjwleffkdkjfker'
+JWT_SECRET = "fddjfqewrhjrqewjhsdvhfdgr"
+
+DB_CONFIG = {"dbname": "company_info", "user": "", "password": "your_password", "host": "localhost"}
 
 
 def get_db_connection():
