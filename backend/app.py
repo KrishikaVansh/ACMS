@@ -1,23 +1,46 @@
-import os
-import jwt
-import psycopg2
-import bcrypt
+import jwt, psycopg2, bcrypt, os, json
 from flask import Flask, request, jsonify, session, redirect
+from flask_cors import CORS
 from datetime import datetime, timedelta
 from functools import wraps
 from google_auth_oauthlib.flow import Flow
 
+
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'ffljkwfjwleffkdkjfker'
-JWT_SECRET = "fddjfqewrhjrqewjhsdvhfdgr"
+app.config['SECRET_KEY'] = 'supersecretkey'
+JWT_SECRET = "jwtsecretkey"
 
-DB_CONFIG = {"dbname": "company_info", "user": "", "password": "your_password", "host": "localhost"}
+# Enable CORS
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
 
+# Load Database Config
+with open("db_config.json") as config_file:
+    DB_CONFIG = json.load(config_file)
 
+# Connect to PostgreSQL
 def get_db_connection():
     return psycopg2.connect(**DB_CONFIG)
 
+# Ensure database table exists
+def init_db():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            company_name TEXT,
+            admin_name TEXT,
+            email TEXT UNIQUE NOT NULL,
+            passwd TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
+init_db()  # Run DB initialization
+
+# Middleware for JWT Authentication
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -27,12 +50,20 @@ def token_required(f):
         try:
             decoded = jwt.decode(token.split()[1], JWT_SECRET, algorithms=["HS256"])
             request.user = decoded
-        except Exception as e:
+        except:
             return jsonify({"error": "Invalid Token!"}), 401
         return f(*args, **kwargs)
     return decorated
 
+# Handle CORS Preflight Requests
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "http://localhost:3000"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    return response
 
+# Signup Route
 @app.route('/signup', methods=['POST'])
 def signup():
     data = request.json
@@ -41,7 +72,8 @@ def signup():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("INSERT INTO users (company_name, admin_name, email, password) VALUES (%s, %s, %s, %s)", (company_name, admin_name, email, hashed_password))
+        cur.execute("INSERT INTO users (company_name, admin_name, email, passwd) VALUES (%s, %s, %s, %s)",
+                    (company_name, admin_name, email, hashed_password))
         conn.commit()
         cur.close()
         conn.close()
@@ -49,31 +81,35 @@ def signup():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
+# Login Route
 @app.route('/login', methods=['POST'])
 def login():
     data = request.json
     email, password = data['email'], data['password']
+    
     conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT id, password FROM users WHERE email = %s", (email,))
+    cur.execute("SELECT id, passwd FROM users WHERE email = %s", (email,))
     user = cur.fetchone()
     cur.close()
     conn.close()
+
     if not user or not bcrypt.checkpw(password.encode(), user[1].encode()):
         return jsonify({"error": "Invalid credentials"}), 401
-    token = jwt.encode({"user_id": user[0], "exp": datetime.now(datetime.timezone.utc) + timedelta(hours=24)}, JWT_SECRET, algorithm="HS256")
+
+    token = jwt.encode({"user_id": user[0], "exp": datetime.utcnow() + timedelta(hours=24)},
+                       JWT_SECRET, algorithm="HS256")
     return jsonify({"token": token})
 
-
-oauth_flow = Flow.from_client_secrets_file('client_secret.json', scopes=['email', 'profile'], redirect_uri='http://localhost:5000/callback_google')
-
+# Google OAuth Flow
+oauth_flow = Flow.from_client_secrets_file('client_secret.json',
+                                           scopes=['email', 'profile'],
+                                           redirect_uri='http://localhost:5000/callback_google')
 
 @app.route('/login_google')
 def google_login():
     auth_url, _ = oauth_flow.authorization_url()
     return redirect(auth_url)
-
 
 @app.route('/callback_google')
 def google_callback():
@@ -82,6 +118,12 @@ def google_callback():
     session['google_token'] = credentials.token
     return jsonify({"message": "Google login successful", "token": credentials.token})
 
+# Dashboard Route (Protected)
+@app.route('/dashboard', methods=['GET'])
+@token_required
+def dashboard():
+    return jsonify({"message": f"Welcome to Dashboard, User {request.user['user_id']}!"})
 
+# Run Flask App
 if __name__ == '__main__':
     app.run(debug=True)
