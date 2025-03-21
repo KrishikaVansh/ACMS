@@ -3,15 +3,26 @@ from flask import Flask, request, jsonify, session, redirect
 from flask_cors import CORS
 from datetime import datetime, timedelta
 from functools import wraps
+from google.auth.transport.requests import Request
+import google.auth.exceptions
 from google_auth_oauthlib.flow import Flow
 
+#remember to set OAUTHLIB_INSECURE_TRANSPORT = 1
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'supersecretkey'
 JWT_SECRET = "jwtsecretkey"
+os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 # Enable CORS
 CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}}, supports_credentials=True)
+
+scopes = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/userinfo.email"
+]
+oauth_flow = Flow.from_client_secrets_file("client_secret.json", scopes=scopes, redirect_uri="http://localhost:5000/callback_google")
 
 # Load Database Config
 with open("db_config.json") as config_file:
@@ -20,6 +31,41 @@ with open("db_config.json") as config_file:
 # Connect to PostgreSQL
 def get_db_connection():
     return psycopg2.connect(**DB_CONFIG)
+
+
+
+@app.route('/user', methods=['GET'])
+def get_user():
+    token = request.headers.get("Authorization")
+    
+    if not token:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        # Decode JWT token
+        decoded = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        user_id = decoded["user_id"]
+
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Get user details
+        cur.execute("SELECT admin_name, email FROM users WHERE id = %s", (user_id,))
+        user = cur.fetchone()
+        
+        cur.close()
+        conn.close()
+
+        if user:
+            return jsonify({"name": user[0], "email": user[1]})
+        else:
+            return jsonify({"error": "User not found"}), 404
+
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Token expired"}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({"error": "Invalid token"}), 401
+
 
 # Ensure database table exists
 def init_db():
@@ -97,26 +143,61 @@ def login():
     if not user or not bcrypt.checkpw(password.encode(), user[1].encode()):
         return jsonify({"error": "Invalid credentials"}), 401
 
-    token = jwt.encode({"user_id": user[0], "exp": datetime.utcnow() + timedelta(hours=24)},
+    token = jwt.encode({"user_id": user[0], "exp": datetime.now(datetime.timezone.utc) + timedelta(hours=24)},
                        JWT_SECRET, algorithm="HS256")
     return jsonify({"token": token})
 
-# Google OAuth Flow
-oauth_flow = Flow.from_client_secrets_file('client_secret.json',
-                                           scopes=['email', 'profile'],
-                                           redirect_uri='http://localhost:5000/callback_google')
+
+from flask import Flask, request, redirect, session, jsonify
+from google_auth_oauthlib.flow import Flow
+from google.auth.transport.requests import Request
+import google.auth.exceptions
+
+app = Flask(__name__)
+app.secret_key = "your_secret_key"
+
+# Enable HTTP for local development (remove this in production)
+import os
+os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
+# Google OAuth Flow Setup
+flow = Flow.from_client_secrets_file(
+    'client_secret.json',
+    scopes=["openid", "email", "profile"],
+    redirect_uri="http://localhost:5000/callback_google"
+)
 
 @app.route('/login_google')
 def google_login():
-    auth_url, _ = oauth_flow.authorization_url()
+    auth_url, _ = flow.authorization_url(prompt="consent")
     return redirect(auth_url)
 
 @app.route('/callback_google')
 def google_callback():
-    oauth_flow.fetch_token(authorization_response=request.url)
-    credentials = oauth_flow.credentials
-    session['google_token'] = credentials.token
-    return jsonify({"message": "Google login successful", "token": credentials.token})
+    try:
+        flow.fetch_token(authorization_response=request.url)
+
+        credentials = flow.credentials
+        session["google_token"] = credentials.token
+
+        # Get user info
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        creds = Credentials(credentials.token)
+        service = build("oauth2", "v2", credentials=creds)
+        user_info = service.userinfo().get().execute()
+
+        # Store user info in session
+        session["user"] = user_info
+
+        return redirect("http://localhost:3000/dashboard")
+
+    except google.auth.exceptions.RefreshError:
+        return jsonify({"error": "Failed to refresh token"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 # Dashboard Route (Protected)
 @app.route('/dashboard', methods=['GET'])
