@@ -1,7 +1,1 @@
-{
-    "dbname":"acms",
-    "user":"postgres",
-    "password":"vam#090905",
-    "host": "localhost",
-    "port": 5432
-}
+
